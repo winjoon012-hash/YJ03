@@ -1,0 +1,6 @@
+{
+  "name": "아산 민원도우미",
+  "description": "아산시 반복·다양 민원 AI 답변 초안 및 행정 근거 지원 어시스턴트",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
