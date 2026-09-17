@@ -25,7 +25,8 @@ import {
   X,
   Search,
   CheckCircle,
-  Undo2
+  Undo2,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   Complaint,
@@ -49,6 +50,8 @@ interface AiAnalysisPaneProps {
   onViewPastComplaint: (complaint: Complaint) => void;
   onUpdateRecurrentDecision: (decision: '동일민원' | '유사민원' | '별도민원', note: string) => void;
   isDrafting: boolean;
+  onGenerateDraft?: () => void;
+  isAnalyzing?: boolean;
 }
 
 export const AiAnalysisPane: React.FC<AiAnalysisPaneProps> = ({
@@ -64,6 +67,8 @@ export const AiAnalysisPane: React.FC<AiAnalysisPaneProps> = ({
   onViewPastComplaint,
   onUpdateRecurrentDecision,
   isDrafting,
+  onGenerateDraft,
+  isAnalyzing = false,
 }) => {
   const [activeTab, setActiveTab] = useState<'analysis' | 'draft' | 'similar' | 'evidence'>('draft');
   const [editedContent, setEditedContent] = useState<string>(draft?.finalResponse || draft?.fullDraft || '');
@@ -225,8 +230,8 @@ export const AiAnalysisPane: React.FC<AiAnalysisPaneProps> = ({
               <button
                 key={s}
                 onClick={() => onSelectStyle(s)}
-                className={`px-2.5 py-1 rounded-md text-xs font-medium transition-all ${
-                  draft?.style === s
+                className={`px-2.5 py-1 rounded-md text-xs font-medium transition-all cursor-pointer ${
+                  (draft?.style || '기본형') === s
                     ? 'bg-white text-blue-700 font-bold shadow-2xs'
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
@@ -286,6 +291,57 @@ export const AiAnalysisPane: React.FC<AiAnalysisPaneProps> = ({
         {/* TAB 1: AI DRAFT & HUMAN EDIT (Core Workflow) */}
         {activeTab === 'draft' && (
           <div className="space-y-4">
+            {/* Empty Draft Guidance & Generation Card (When Draft is not yet generated) */}
+            {!draft && (
+              <div className="p-6 rounded-xl border-2 border-dashed border-blue-200 bg-gradient-to-br from-blue-50/70 via-white to-slate-50 flex flex-col items-center justify-center text-center space-y-4 shadow-2xs">
+                <div className="w-12 h-12 rounded-xl bg-blue-100/90 text-[#005BAA] flex items-center justify-center shadow-xs">
+                  <Sparkles className="w-6 h-6 animate-pulse" />
+                </div>
+                <div className="max-w-md space-y-1.5">
+                  <h3 className="text-sm font-bold text-slate-800">
+                    AI 공직 답변 초안이 아직 작성되지 않았습니다
+                  </h3>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    입력된 민원 내용을 바탕으로 <strong>개인정보 비식별화(PII 마스킹)</strong> 보호 조치 후,
+                    아산시 자치법규와 매뉴얼을 연계하여 <strong>표준 7단계 행정 서식</strong>으로 답변 초안을 자동 생성합니다.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-center gap-2 text-[11px] text-slate-600">
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-white rounded-md border border-slate-200 shadow-2xs font-medium">
+                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>개인정보보호법 준수 (PII Shield)</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-white rounded-md border border-slate-200 shadow-2xs font-medium">
+                    <Scale className="w-3.5 h-3.5 text-blue-600" />
+                    <span>3대 행정 원칙 자체 검증</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-white rounded-md border border-slate-200 shadow-2xs font-medium">
+                    <BookOpen className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>아산시 조례·규칙 연계</span>
+                  </span>
+                </div>
+
+                <button
+                  onClick={onGenerateDraft}
+                  disabled={isDrafting || isAnalyzing || !complaint.민원원문.trim()}
+                  className="px-6 py-3 bg-[#005BAA] hover:bg-[#004B87] disabled:bg-slate-300 text-white text-xs sm:text-sm font-bold rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed hover:shadow-lg active:scale-95"
+                >
+                  {isDrafting || isAnalyzing ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>AI 정밀 분석 및 행정 답변 초안 작성 중...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-4 h-4 text-amber-300" />
+                      <span>답변 초안 생성 (공식 7단계 서식)</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
+
             {/* Grounding Verification Banner (PRD Section 25) */}
             {draft?.groundingVerification && (
               <div className="p-3.5 rounded-xl border border-blue-100 bg-blue-50/50 space-y-2">
@@ -342,27 +398,41 @@ export const AiAnalysisPane: React.FC<AiAnalysisPaneProps> = ({
             )}
 
             {/* Quick Refinement Action Toolbar (PRD Section 10) */}
-            <div className="flex flex-wrap items-center gap-1.5 p-2 bg-slate-50 rounded-lg border border-slate-200">
-              <span className="text-xs font-semibold text-slate-600 px-1">
-                AI 초안 다듬기:
-              </span>
-              {[
-                '더 공손하게',
-                '더 간결하게',
-                '쉽게 설명',
-                '법령 근거 강화',
-                '핵심만 정리',
-                '공식 표준 서식',
-              ].map((btn) => (
+            <div className="flex flex-wrap items-center justify-between gap-2 p-2 bg-slate-50 rounded-lg border border-slate-200">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs font-semibold text-slate-600 px-1">
+                  AI 초안 다듬기:
+                </span>
+                {[
+                  '더 공손하게',
+                  '더 간결하게',
+                  '쉽게 설명',
+                  '법령 근거 강화',
+                  '핵심만 정리',
+                  '공식 표준 서식',
+                ].map((btn) => (
+                  <button
+                    key={btn}
+                    onClick={() => onRefineDraft(btn)}
+                    disabled={isDrafting || isAnalyzing}
+                    className="px-2.5 py-1 text-xs rounded-md bg-white border border-slate-200 text-slate-700 hover:border-blue-400 hover:text-blue-600 transition-colors font-medium cursor-pointer disabled:opacity-50"
+                  >
+                    {btn}
+                  </button>
+                ))}
+              </div>
+
+              {onGenerateDraft && (
                 <button
-                  key={btn}
-                  onClick={() => onRefineDraft(btn)}
-                  disabled={isDrafting}
-                  className="px-2.5 py-1 text-xs rounded-md bg-white border border-slate-200 text-slate-700 hover:border-blue-400 hover:text-blue-600 transition-colors font-medium cursor-pointer"
+                  onClick={onGenerateDraft}
+                  disabled={isDrafting || isAnalyzing || !complaint.민원원문.trim()}
+                  className="px-2.5 py-1 text-xs rounded-md bg-white border border-blue-200 text-[#005BAA] hover:bg-blue-50 transition-colors font-semibold flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  title="현재 민원 내용을 바탕으로 답변 초안을 다시 작성합니다"
                 >
-                  {btn}
+                  <RefreshCw className={`w-3.5 h-3.5 ${isDrafting || isAnalyzing ? 'animate-spin' : ''}`} />
+                  <span>{draft ? '초안 다시 생성' : '답변 초안 생성'}</span>
                 </button>
-              ))}
+              )}
             </div>
 
             {/* Quick Template Recommendation Bar */}

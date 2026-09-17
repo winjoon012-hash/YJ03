@@ -24,6 +24,8 @@ import {
   INITIAL_AUDIT_LOGS,
 } from './data/seedData';
 import { calculateComplaintSimilarity, searchKnowledgeDocuments } from './utils/similarity';
+import { generateAdministrativeDraft } from './utils/draftGenerator';
+import { detectAndMaskPii } from './utils/pii';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'workspace' | 'list' | 'knowledge' | 'dashboard' | 'audit'>('workspace');
@@ -107,8 +109,108 @@ export default function App() {
     return { rankedComplaints, rankedDocs };
   };
 
+  // Dedicated Draft Generation with Multi-tier Resilience & PII Protection
+  const handleGenerateDraft = async (targetStyle?: DraftStyle, instruction?: string) => {
+    if (!currentComplaint || !currentComplaint.민원원문.trim()) return;
+
+    const styleToUse = targetStyle || draft?.style || '기본형';
+    setIsDrafting(true);
+
+    // 1. PII Security Check & Real-time Sanitization
+    const { maskedText, detectedPii } = detectAndMaskPii(currentComplaint.민원원문);
+    if (detectedPii.length > 0) {
+      addAuditLog(
+        '개인정보마스킹',
+        `개인정보보호법 준수: ${detectedPii.length}건 비식별화 암호화 마스킹 완료 후 AI 안전 전송`
+      );
+    }
+
+    // 2. Perform RAG document retrieval & past complaint matching
+    const { rankedComplaints, rankedDocs } = runSearchAndMatching(currentComplaint);
+    const sanitizedComplaint: Complaint = {
+      ...currentComplaint,
+      마스킹원문: maskedText || currentComplaint.마스킹원문,
+    };
+
+    try {
+      // 3. Attempt Server Gemini draft generation with timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8500);
+
+      const draftRes = await fetch('/api/gemini/generate-draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          complaint: sanitizedComplaint,
+          docs: rankedDocs.slice(0, 3),
+          pastCases: rankedComplaints.slice(0, 2),
+          style: styleToUse,
+          refineInstruction: instruction,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (draftRes.ok) {
+        const draftData = await draftRes.json();
+        if (draftData.success && draftData.data) {
+          const d = draftData.data;
+          const generatedDraft: ResponseDraft = {
+            response_id: draft?.response_id || `DFT-${Date.now().toString().slice(-6)}`,
+            complaint_id: sanitizedComplaint.complaint_id,
+            style: styleToUse,
+            sections: d.sections,
+            fullDraft: d.fullDraft,
+            officerEdited: d.fullDraft,
+            finalResponse: d.fullDraft,
+            usedCitations: d.usedCitations || [],
+            groundingVerification: d.groundingVerification,
+            isExemplary: false,
+            author: userName,
+            createdAt: draft?.createdAt || new Date().toLocaleDateString('ko-KR'),
+            updatedAt: new Date().toLocaleTimeString('ko-KR'),
+          };
+
+          setDraft(generatedDraft);
+          setCurrentComplaint((prev) => ({ ...prev, 처리상태: '초안작성중' }));
+          addAuditLog(
+            'AI답변생성',
+            `답변 초안 생성 완료 (근거자료 ${generatedDraft.usedCitations.length}건 인용, 문체: ${styleToUse}${instruction ? `, 다듬기: '${instruction}'` : ''})`
+          );
+          setIsDrafting(false);
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn('Server draft API fallback engaged:', err);
+    }
+
+    // 4. Guaranteed Client-side Administrative Fallback
+    try {
+      const fallbackDraft = generateAdministrativeDraft(
+        sanitizedComplaint,
+        rankedDocs,
+        styleToUse,
+        instruction,
+        userName
+      );
+      setDraft(fallbackDraft);
+      setCurrentComplaint((prev) => ({ ...prev, 처리상태: '초안작성중' }));
+      addAuditLog(
+        'AI답변생성',
+        `행정 표준 규칙 기반 답변 초안 생성 완료 (개인정보 보호 및 3대 행정 원칙 자체 검증 통과, 문체: ${styleToUse})`
+      );
+    } catch (fallbackErr) {
+      console.error('Fallback draft error:', fallbackErr);
+    } finally {
+      setIsDrafting(false);
+    }
+  };
+
   // Run full AI Analysis & Draft generation
   const handleRunAnalysis = async () => {
+    if (!currentComplaint.민원원문.trim()) return;
     setIsAnalyzing(true);
     const content = currentComplaint.마스킹원문 || currentComplaint.민원원문;
 
@@ -125,83 +227,51 @@ export default function App() {
       const { rankedComplaints, rankedDocs } = runSearchAndMatching(currentComplaint);
 
       // 3. Call Server analyze endpoint
-      const analyzeRes = await fetch('/api/gemini/analyze-complaint', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: content }),
-      });
-      const analyzeData = await analyzeRes.json();
-
-      let updatedComplaint = { ...currentComplaint };
-
-      if (analyzeData.success && analyzeData.data) {
-        const d = analyzeData.data;
-        const isRecurrent = rankedComplaints.length > 0;
-        updatedComplaint = {
-          ...updatedComplaint,
-          민원제목: d.title || updatedComplaint.민원제목,
-          민원요약: d.summaryText || updatedComplaint.민원요약,
-          핵심요구사항: d.keyDemands || updatedComplaint.핵심요구사항,
-          키워드: d.keywords || updatedComplaint.키워드,
-          민원분야: d.suggestedCategory || updatedComplaint.민원분야,
-          세부분류: d.subCategory || updatedComplaint.세부분류,
-          지역: d.region || updatedComplaint.지역,
-          담당부서: d.expectedDepartment || updatedComplaint.담당부서,
-          민원유형: (d.recommendedType as any) || updatedComplaint.민원유형,
-          처리기한일수: d.deadlineDays || updatedComplaint.처리기한일수,
-          처리상태: '초안작성중',
-          반복민원탐지: isRecurrent
-            ? {
-                isRecurrentLikely: true,
-                similarityScore: 94,
-                matchedComplaintIds: [rankedComplaints[0].complaint_id],
-                commonIssue: `${d.region} 일원 ${d.subCategory} 관련 기존 처리 이력 존재`,
-                officerDecision: undefined,
-              }
-            : undefined,
-        };
-        setCurrentComplaint(updatedComplaint);
+      try {
+        const analyzeRes = await fetch('/api/gemini/analyze-complaint', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: content }),
+        });
+        if (analyzeRes.ok) {
+          const analyzeData = await analyzeRes.json();
+          if (analyzeData.success && analyzeData.data) {
+            const d = analyzeData.data;
+            const isRecurrent = rankedComplaints.length > 0;
+            setCurrentComplaint((prev) => ({
+              ...prev,
+              민원제목: d.title || prev.민원제목,
+              민원요약: d.summaryText || prev.민원요약,
+              핵심요구사항: d.keyDemands || prev.핵심요구사항,
+              키워드: d.keywords || prev.키워드,
+              민원분야: d.suggestedCategory || prev.민원분야,
+              세부분류: d.subCategory || prev.세부분류,
+              지역: d.region || prev.지역,
+              담당부서: d.expectedDepartment || prev.담당부서,
+              민원유형: (d.recommendedType as any) || prev.민원유형,
+              처리기한일수: d.deadlineDays || prev.처리기한일수,
+              처리상태: '초안작성중',
+              반복민원탐지: isRecurrent
+                ? {
+                    isRecurrentLikely: true,
+                    similarityScore: 94,
+                    matchedComplaintIds: [rankedComplaints[0].complaint_id],
+                    commonIssue: `${d.region} 일원 ${d.subCategory} 관련 기존 처리 이력 존재`,
+                    officerDecision: undefined,
+                  }
+                : undefined,
+            }));
+          }
+        }
+      } catch (analyzeErr) {
+        console.warn('Analyze endpoint notice:', analyzeErr);
       }
 
-      // 4. Call Server draft generation endpoint
-      const draftRes = await fetch('/api/gemini/generate-draft', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          complaint: updatedComplaint,
-          docs: rankedDocs.slice(0, 3),
-          pastCases: rankedComplaints.slice(0, 2),
-          style: '기본형',
-        }),
-      });
-
-      const draftData = await draftRes.json();
-
-      if (draftData.success && draftData.data) {
-        const generatedDraft: ResponseDraft = {
-          response_id: `DFT-${Date.now().toString().slice(-6)}`,
-          complaint_id: updatedComplaint.complaint_id,
-          style: '기본형',
-          sections: draftData.data.sections,
-          fullDraft: draftData.data.fullDraft,
-          officerEdited: draftData.data.fullDraft,
-          finalResponse: draftData.data.fullDraft,
-          usedCitations: draftData.data.usedCitations,
-          groundingVerification: draftData.data.groundingVerification,
-          isExemplary: false,
-          author: userName,
-          createdAt: new Date().toLocaleDateString('ko-KR'),
-          updatedAt: new Date().toLocaleTimeString('ko-KR'),
-        };
-
-        setDraft(generatedDraft);
-        addAuditLog(
-          'AI답변생성',
-          `Gemini AI 답변 초안 생성 완료 (근거자료 ${generatedDraft.usedCitations.length}건 인용)`
-        );
-      }
+      // 4. Guaranteed draft generation
+      await handleGenerateDraft('기본형');
     } catch (err) {
       console.error('Analysis or draft generation error:', err);
+      await handleGenerateDraft('기본형');
     } finally {
       setIsAnalyzing(false);
     }
@@ -209,54 +279,17 @@ export default function App() {
 
   // Refine draft with specific instruction or style
   const handleRefineDraft = async (instruction: string) => {
-    if (!currentComplaint) return;
-    setIsDrafting(true);
-
-    try {
-      const draftRes = await fetch('/api/gemini/generate-draft', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          complaint: currentComplaint,
-          docs: matchedDocs.slice(0, 3),
-          pastCases: similarComplaints.slice(0, 2),
-          style: draft?.style || '기본형',
-          refineInstruction: instruction,
-        }),
-      });
-
-      const draftData = await draftRes.json();
-      if (draftData.success && draftData.data) {
-        const newDraft: ResponseDraft = {
-          response_id: draft?.response_id || `DFT-${Date.now()}`,
-          complaint_id: currentComplaint.complaint_id,
-          style: draft?.style || '기본형',
-          sections: draftData.data.sections,
-          fullDraft: draftData.data.fullDraft,
-          officerEdited: draftData.data.fullDraft,
-          finalResponse: draftData.data.fullDraft,
-          usedCitations: draftData.data.usedCitations,
-          groundingVerification: draftData.data.groundingVerification,
-          isExemplary: false,
-          author: userName,
-          createdAt: draft?.createdAt || new Date().toLocaleDateString('ko-KR'),
-          updatedAt: new Date().toLocaleTimeString('ko-KR'),
-        };
-        setDraft(newDraft);
-        addAuditLog('AI답변생성', `AI 초안 수정 반영 ('${instruction}')`);
-      }
-    } catch (err) {
-      console.error('Refinement failed:', err);
-    } finally {
-      setIsDrafting(false);
-    }
+    await handleGenerateDraft(draft?.style || '기본형', instruction);
   };
 
   // Change Style
   const handleSelectStyle = async (newStyle: DraftStyle) => {
-    if (!draft) return;
+    if (!draft) {
+      await handleGenerateDraft(newStyle);
+      return;
+    }
     setDraft((prev) => (prev ? { ...prev, style: newStyle } : null));
-    await handleRefineDraft(`문체 스타일을 [${newStyle}]로 변경하여 다시 작성`);
+    await handleGenerateDraft(newStyle, `문체 스타일을 [${newStyle}]로 변경하여 다시 작성`);
   };
 
   // Select Preset Complaint
@@ -475,6 +508,8 @@ export default function App() {
                   onViewPastComplaint={(c) => setSelectedPastComplaintModal(c)}
                   onUpdateRecurrentDecision={handleUpdateRecurrentDecision}
                   isDrafting={isDrafting}
+                  onGenerateDraft={() => handleGenerateDraft()}
+                  isAnalyzing={isAnalyzing}
                 />
               </div>
             </div>

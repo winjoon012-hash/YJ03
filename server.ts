@@ -1,14 +1,10 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 
 dotenv.config();
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3000;
@@ -31,6 +27,15 @@ function getGeminiClient(): GoogleGenAI | null {
   });
 }
 
+// Server-side PII Sanitizer for Defense-in-depth Security
+function sanitizePiiForServer(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/\b\d{6}-[1-4]\d{6}\b/g, '[주민등록번호]')
+    .replace(/\b(01[016789]-?\d{3,4}-?\d{4}|041-?\d{3,4}-?\d{4}|02-?\d{3,4}-?\d{4})\b/g, '[전화번호]')
+    .replace(/\b([0-9]{2,3}[가-힣]\s*[0-9]{4}|충남[0-9]{2}[가-힣][0-9]{4})\b/g, '[차량번호]');
+}
+
 // Resilient multi-tier model execution with graceful fallback
 interface GeminiCallParams {
   contents: string;
@@ -46,40 +51,29 @@ async function callGeminiWithFallback(
   ai: GoogleGenAI,
   params: GeminiCallParams
 ): Promise<GeminiCallResult | null> {
-  const candidateModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
+  const candidateModels = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-2.5-flash'];
 
   for (const model of candidateModels) {
     try {
-      const response = await ai.models.generateContent({
+      // 8-second timeout per model attempt to prevent hanging requests
+      const generatePromise = ai.models.generateContent({
         model,
         contents: params.contents,
         config: params.config,
       });
 
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('AI Call Timeout')), 8000)
+      );
+
+      const response = await Promise.race([generatePromise, timeoutPromise]);
+
       if (response && response.text) {
         return { text: response.text, engine: model };
       }
     } catch (err: any) {
-      // Cleanly check for transient demand/overload
-      const isTransient =
-        err?.status === 503 ||
-        err?.status === 429 ||
-        err?.code === 503 ||
-        (typeof err?.message === 'string' &&
-          (err.message.includes('503') ||
-            err.message.includes('high demand') ||
-            err.message.includes('UNAVAILABLE') ||
-            err.message.includes('RESOURCE_EXHAUSTED')));
-
-      if (isTransient) {
-        // Log clean notice without dumping stack trace
-        console.log(`[AI Dispatcher] Model '${model}' experiencing temporary high demand. Falling back to alternative model...`);
-        await new Promise((resolve) => setTimeout(resolve, 300));
-        continue;
-      } else {
-        console.log(`[AI Dispatcher] Model '${model}' returned non-transient status. Transitioning to fallback engine.`);
-        break;
-      }
+      console.log(`[AI Dispatcher] Model '${model}' attempt notice: ${err?.message || 'deferred'}. Switching to backup...`);
+      continue;
     }
   }
 
@@ -191,13 +185,15 @@ app.post('/api/gemini/generate-draft', async (req: Request, res: Response) => {
   try {
     const { complaint, docs, pastCases, style, refineInstruction } = req.body;
 
-    if (!complaint || !complaint.민원원문) {
-      return res.status(400).json({ error: '민원 정보가 올바르지 않습니다.' });
+    const rawComplaintText = complaint?.마스킹원문 || complaint?.민원원문 || '';
+    if (!complaint || !rawComplaintText.trim()) {
+      return res.status(400).json({ error: '민원 본문 내용이 필요합니다.' });
     }
 
     const ai = getGeminiClient();
-
     const selectedStyle = style || '기본형';
+    const sanitizedComplaintText = sanitizePiiForServer(rawComplaintText);
+
     const evidenceText = (docs || [])
       .map(
         (d: any, idx: number) =>
@@ -237,7 +233,7 @@ app.post('/api/gemini/generate-draft', async (req: Request, res: Response) => {
 ${refineInstruction ? `\n[추가 편집 지시사항]: ${refineInstruction}` : ''}
 
 [민원 접수 정보]
-- 민원인 내용 (개인정보 보호 마스킹 처리됨): ${complaint.마스킹원문 || complaint.민원원문}
+- 민원인 내용 (개인정보 보호 비식별화 처리됨): ${sanitizedComplaintText}
 - 민원 제목: ${complaint.민원제목 || '민원 접수'}
 - 지역: ${complaint.지역 || '아산시 관내'}
 - 소관부서: ${complaint.담당부서 || '소관부서'} (담당자: ${complaint.담당자 || '담당 주무관'})
@@ -305,7 +301,8 @@ ${pastCasesText || '과거 유사 사례가 없습니다.'}
         });
 
         if (result && result.text) {
-          const parsed = JSON.parse(result.text);
+          const cleanedText = result.text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+          const parsed = JSON.parse(cleanedText);
           const fullDraft = [
             `1. ${parsed.greeting}`,
             `2. ${parsed.summary}`,
@@ -352,7 +349,13 @@ ${pastCasesText || '과거 유사 사례가 없습니다.'}
     return res.json({ success: true, data: fallbackDraft, engine: 'heuristic-draft-engine' });
   } catch (error: any) {
     console.error('Error in generate-draft:', error);
-    res.status(500).json({ error: error.message || '답변 초안 생성 중 오류가 발생했습니다.' });
+    const fallbackDraft = generateHeuristicDraft(
+      req.body?.complaint || {},
+      req.body?.docs || [],
+      req.body?.style || '기본형',
+      req.body?.refineInstruction
+    );
+    return res.json({ success: true, data: fallbackDraft, engine: 'fallback-safety-engine' });
   }
 });
 

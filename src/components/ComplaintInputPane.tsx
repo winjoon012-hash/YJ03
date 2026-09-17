@@ -288,17 +288,17 @@ export const ComplaintInputPane: React.FC<ComplaintInputPaneProps> = ({
         <button
           onClick={onRunAnalysis}
           disabled={isAnalyzing || !currentComplaint.민원원문.trim()}
-          className="flex-1 px-4 py-2.5 bg-[#005BAA] hover:bg-[#004B87] disabled:bg-slate-300 text-white text-sm font-bold rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
+          className="flex-1 px-4 py-2.5 bg-[#005BAA] hover:bg-[#004B87] disabled:bg-slate-300 text-white text-sm font-bold rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed hover:shadow"
         >
           {isAnalyzing ? (
             <>
               <RefreshCw className="w-4 h-4 animate-spin" />
-              <span>AI 민원 분석 및 행정 근거 RAG 검색 중...</span>
+              <span>AI 민원 분석 및 답변 초안 작성 중...</span>
             </>
           ) : (
             <>
-              <Sparkles className="w-4 h-4" />
-              <span>AI 정밀 분석 & 답변 초안 생성</span>
+              <Sparkles className="w-4 h-4 text-amber-300" />
+              <span>답변 초안 생성 (AI 정밀 분석 & 7단계 서식)</span>
             </>
           )}
         </button>
